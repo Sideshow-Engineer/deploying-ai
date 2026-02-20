@@ -1,81 +1,151 @@
-# Assignment 2 Chat Client (Starter)
+# Assignment 2 Chat Client
 
-## Nature of the Chat Client
-This project implements a conversational AI assistant called **Systems Pilot**.
-The client is designed to be practical, structured, and implementation-focused.
-It responds in a concise technical style and is intended to orchestrate multiple
-services behind a single chat interface.
+## Overview
+This project implements a Gradio chat assistant named **Systems Pilot**.  
+The client provides three services through one interface:
 
-The user interface is chat-based and built with Gradio. Conversation state
-(`history`) is preserved across turns through the interface so the assistant
-maintains short-term memory.
+1. API service (Open-Meteo weather -> construction risk summary)
+2. Semantic query service (local MEP issue knowledge base with ChromaDB)
+3. Function-calling service (`triage_issue` and `draft_rfi`)
 
-## Services Provided
-The system is being built in three services:
+The chat keeps conversation history and routes user requests by intent.
 
-1. API Calls Service
-- A tool backed by a public API.
-- The API result will be transformed before returning (not verbatim output).
+## Service 1: API Calls (Open-Meteo)
+- Runtime module: `services/weather_service.py`
+- Backend APIs:
+  - Open-Meteo geocoding API
+  - Open-Meteo forecast API
+- Input handling:
+  - location (default: Toronto)
+  - date intent (`today`, `tomorrow`, `next 3 days`, or explicit date/range)
+- Output:
+  - transformed weather risk summary for commissioning/site planning
+  - action cues (not raw JSON)
 
-2. Semantic Query Service (Implemented MVP)
-- Question answering over a local MEP dataset using semantic retrieval.
-- Data source: `data/mep_issue_kb.csv`.
-- Storage: ChromaDB persistent directory `chroma_db/`.
-- Runtime service: `services/rag_service.py`.
-- Index build script: `scripts/build_chroma.py`.
-- Output style: short synthesized triage response + issue citations (`MEP-xxx: title`).
+### Service 1 Heuristics
+Threshold-based and explainable rules are used:
+- wind risk: gust >= 45 km/h or sustained wind >= 30 km/h
+- freeze risk: min temperature <= 1C
+- precipitation risk: precipitation >= 10 mm/day or precipitation hours >= 6 h/day
+- snow risk: snowfall >= 1 cm/day
+- heat risk: max temperature >= 30C
 
-3. Custom Service
-- One additional service using one of:
-  - Function calling
-  - Web search
-  - MCP server connection
+## Service 2: Semantic Query (RAG-style retrieval)
+- Runtime module: `services/rag_service.py`
+- Dataset: `data/mep_issue_kb.csv`
+- Vector store: persistent ChromaDB in `chroma_db/`
+- Build script: `scripts/build_chroma.py`
+- Retrieval metadata includes:
+  - `root_causes`
+  - `field_checks`
+  - `recommended_actions`
+  - `rfi_template_question`
+  - `risk_tags`
+- Output:
+  - grounded troubleshooting response
+  - citations (`MEP-xxx: title`)
 
-## Guardrails
-The chat client applies guardrails to:
-- Block attempts to reveal or modify system/developer prompts.
-- Refuse restricted topics:
-  - Cats or dogs
-  - Horoscopes or Zodiac Signs
-  - Taylor Swift
-
-## Implementation Decisions
-1. Incremental build strategy
-- Start with a stable chat scaffold and guardrails, then add one service at a
-  time to reduce integration risk.
-
-2. UI first, services second
-- Keep a working Gradio interface available from the beginning to test memory,
-  tone, and response behavior continuously.
-
-3. Simple repository footprint
-- Keep all assignment code under `05_src/assignment_chat`.
-- Use only course-provided dependencies.
-
-4. Observability and testing approach
-- Validate each service independently before wiring into routing logic.
-- Use short manual test scripts/prompts during development and document
-  assumptions in this file.
-
-## How To Build Service 2 Index
-Run once after data updates:
-
+### Build/Refresh the Vector Index
 ```bash
 python 05_src/assignment_chat/scripts/build_chroma.py
 ```
+Run this after any KB CSV/schema updates so metadata fields stay in sync.
 
-This builds/refreshes the persistent Chroma collection using:
-- collection name: `mep_issue_kb`
-- embedding model: `all-MiniLM-L6-v2`
-- persistence path: `05_src/assignment_chat/chroma_db`
+### Evaluate Retrieval/Groundedness
+```bash
+python 05_src/assignment_chat/scripts/eval_rag.py
+```
 
-After building locally, keep the generated `chroma_db/` files in your branch so reviewers can run the app without regenerating embeddings.
+Optional JSON report:
+```bash
+python 05_src/assignment_chat/scripts/eval_rag.py --json-out 05_src/assignment_chat/data/rag_eval_report.json
+```
 
-## Current Status
-- `app.py` includes:
-  - Chat interface
-  - Personality baseline
-  - Guardrail checks
-  - Routing to Service 2 (RAG) when issue-related queries are detected
-- Service 2 implementation completed at MVP level.
-- Services 1 and 3 are next.
+## Service 3: Function Calling
+- Runtime module: `services/function_calling_service.py`
+- Tool modules:
+  - `lookup_issue_kb` (wrapper around Service 2 KB lookup)
+  - `tools/triage_issue.py`
+  - `tools/draft_rfi.py`
+- Assignment tool option used: **Function Calling**
+- Multi-step tool loop supported (up to 3 steps):
+  - typical RFI flow: `lookup_issue_kb -> triage_issue -> draft_rfi`
+- Recent conversation turns are passed to Service 3 for follow-up continuity.
+
+### Tool: `lookup_issue_kb`
+Input:
+- `query_text` (required)
+- `top_k` (optional)
+
+Output:
+- `best_match` (id/title/system/stage/location plus key troubleshooting fields)
+- `related_matches`
+- `citation`
+
+### Tool: `triage_issue`
+Input:
+- `issue_text` (required)
+- `system_hint` (optional)
+- `stage_hint` (optional)
+
+Output:
+- `risk_level`
+- `risk_dimensions`
+- `likely_disciplines`
+- `recommended_next_steps`
+- `needs_rfi`
+- `rfi_reason`
+
+### Tool: `draft_rfi`
+Input:
+- `project`
+- `system`
+- `location_scope`
+- `issue_summary`
+- `observations` (list)
+- `question_to_designer`
+- `needed_by_date`
+- `attachments_suggested` (optional)
+
+Output:
+- `subject`
+- `background`
+- `question`
+- `impact_if_unresolved`
+- `proposed_direction_optional`
+- `attachments_suggested`
+- `needed_by_date`
+
+## Guardrails
+Guardrails are implemented in `guardrails.py` and run as a pre-check before service routing.
+
+Blocked categories:
+- Attempts to reveal/modify instructions (e.g., prompt injection patterns)
+- Restricted topics from assignment requirements:
+  - cats/dogs
+  - horoscopes/zodiac
+  - Taylor Swift
+
+Behavior:
+- Returns a brief refusal message when triggered.
+
+## Run the App
+```bash
+python 05_src/assignment_chat/app.py
+```
+
+## Example Prompts
+
+### Service 1
+- `Weather risk for Toronto tomorrow`
+- `Construction forecast in Mississauga next 3 days`
+- `Forecast in Hamilton 2026-02-20 to 2026-02-22`
+
+### Service 2
+- `AHU commissioning issue: OA damper command changes but OA flow stays low`
+- `VAV zone overheats while reheat command is zero`
+- `CHW pump VFD hunting and unstable differential pressure`
+
+### Service 3
+- `Triage this issue: AHU mixed air temperature oscillates during economizer changeover.`
+- `Draft RFI for project North Tower, system AHU-3, location mechanical room, issue economizer hunting, observations: MAT swings; dampers move continuously, question: confirm deadband and changeover strategy, needed by 2026-02-28.`

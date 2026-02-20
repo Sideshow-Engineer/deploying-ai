@@ -16,6 +16,21 @@ class RagResult:
     citations: list[str]
 
 
+@dataclass
+class RagMatch:
+    id: str
+    title: str
+    system: str
+    discipline: str
+    stage: str
+    location_scope: str
+    root_causes: str
+    field_checks: str
+    recommended_actions: str
+    rfi_template_question: str
+    risk_tags: str
+
+
 _SYSTEM_MAP = {
     "ahu": "AHU",
     "vav": "VAV",
@@ -75,6 +90,8 @@ def _where_filter(query: str) -> dict[str, Any] | None:
 
 
 def _extract_field(document: str, field_name: str) -> str:
+    if not document:
+        return ""
     prefix = f"{field_name}:"
     for line in document.splitlines():
         if line.startswith(prefix):
@@ -82,34 +99,53 @@ def _extract_field(document: str, field_name: str) -> str:
     return ""
 
 
-def _build_answer(documents: list[str], ids: list[str], titles: list[str]) -> str:
-    if not documents:
+def _to_match(
+    metadata: dict[str, Any] | None,
+    fallback_id: str = "",
+    fallback_title: str = "",
+    document: str = "",
+) -> RagMatch:
+    meta = metadata or {}
+    return RagMatch(
+        id=str(meta.get("id", fallback_id)),
+        title=str(meta.get("title", fallback_title)),
+        system=str(meta.get("system", "")),
+        discipline=str(meta.get("discipline", "")),
+        stage=str(meta.get("stage", "")),
+        location_scope=str(meta.get("location_scope", "")),
+        root_causes=str(meta.get("root_causes", _extract_field(document, "Root causes"))),
+        field_checks=str(meta.get("field_checks", _extract_field(document, "Field checks"))),
+        recommended_actions=str(
+            meta.get("recommended_actions", _extract_field(document, "Recommended actions"))
+        ),
+        rfi_template_question=str(meta.get("rfi_template_question", _extract_field(document, "RFI prompt"))),
+        risk_tags=str(meta.get("risk_tags", "")),
+    )
+
+
+def _build_answer(matches: list[RagMatch]) -> str:
+    if not matches:
         return (
             "I could not find a confident match in the local MEP issue knowledge base. "
             "Try adding system details (AHU/VAV/CHW), stage, symptoms, and location."
         )
 
-    best_doc = documents[0]
-    best_id = ids[0]
-    best_title = titles[0]
-    best_root_causes = _extract_field(best_doc, "Root causes")
-    best_field_checks = _extract_field(best_doc, "Field checks")
-    best_actions = _extract_field(best_doc, "Recommended actions")
+    best = matches[0]
 
     related = ", ".join(
-        f"{issue_id} ({title})" for issue_id, title in list(zip(ids, titles))[1:4]
+        f"{m.id} ({m.title})" for m in matches[1:4]
     )
     related_text = f"\nRelated cases: {related}." if related else ""
 
     return (
-        f"Best match: {best_id} - {best_title}.\n"
-        f"Likely root causes: {best_root_causes}\n"
-        f"Field checks: {best_field_checks}\n"
-        f"Recommended actions: {best_actions}{related_text}"
+        f"Best match: {best.id} - {best.title}.\n"
+        f"Likely root causes: {best.root_causes}\n"
+        f"Field checks: {best.field_checks}\n"
+        f"Recommended actions: {best.recommended_actions}{related_text}"
     )
 
 
-def query_issue_kb(query: str, top_k: int = DEFAULT_TOP_K) -> RagResult:
+def _query_matches(query: str, top_k: int = DEFAULT_TOP_K) -> list[RagMatch]:
     collection = _collection()
     where = _where_filter(query)
     response = collection.query(
@@ -122,9 +158,55 @@ def query_issue_kb(query: str, top_k: int = DEFAULT_TOP_K) -> RagResult:
     documents = response.get("documents", [[]])[0]
     metadatas = response.get("metadatas", [[]])[0]
     titles = [metadata.get("title", "") if metadata else "" for metadata in metadatas]
+    return [
+        _to_match(
+            metadata=md,
+            fallback_id=issue_id,
+            fallback_title=title,
+            document=document,
+        )
+        for issue_id, title, md, document in zip(ids, titles, metadatas, documents)
+    ]
 
-    answer = _build_answer(documents=documents, ids=ids, titles=titles)
-    citations = [f"{issue_id}: {title}" for issue_id, title in zip(ids, titles)]
 
+def query_issue_kb(query: str, top_k: int = DEFAULT_TOP_K) -> RagResult:
+    matches = _query_matches(query=query, top_k=top_k)
+    answer = _build_answer(matches=matches)
+    citations = [f"{m.id}: {m.title}" for m in matches]
     return RagResult(answer=answer, citations=citations)
 
+
+def lookup_issue_kb(query_text: str, top_k: int = DEFAULT_TOP_K) -> dict[str, Any]:
+    matches = _query_matches(query=query_text, top_k=top_k)
+    if not matches:
+        return {
+            "query": query_text,
+            "best_match": None,
+            "related_matches": [],
+            "citation": "",
+            "note": "No confident KB match found.",
+        }
+
+    best = matches[0]
+    related = matches[1:4]
+    return {
+        "query": query_text,
+        "best_match": {
+            "id": best.id,
+            "title": best.title,
+            "system": best.system,
+            "discipline": best.discipline,
+            "stage": best.stage,
+            "location_scope": best.location_scope,
+            "root_causes": best.root_causes,
+            "field_checks": best.field_checks,
+            "recommended_actions": best.recommended_actions,
+            "rfi_template_question": best.rfi_template_question,
+            "risk_tags": best.risk_tags,
+        },
+        "related_matches": [
+            {"id": item.id, "title": item.title, "system": item.system}
+            for item in related
+        ],
+        "citation": f"{best.id}: {best.title}",
+    }

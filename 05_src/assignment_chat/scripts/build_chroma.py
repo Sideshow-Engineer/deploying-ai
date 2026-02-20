@@ -72,6 +72,10 @@ def _row_to_metadata(row: pd.Series) -> dict[str, str]:
         "discipline": str(row["discipline"]),
         "stage": str(row["stage"]),
         "location_scope": str(row["location_scope"]),
+        "root_causes": str(row["likely_root_causes"]),
+        "field_checks": str(row["field_checks"]),
+        "recommended_actions": str(row["recommended_actions"]),
+        "rfi_template_question": str(row["rfi_template_question"]),
         "risk_tags": str(row["risk_tags"]),
     }
 
@@ -162,4 +166,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
