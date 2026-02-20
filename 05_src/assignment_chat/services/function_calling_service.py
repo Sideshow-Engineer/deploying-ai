@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from datetime import date, timedelta
 from typing import Any
 
 from dotenv import load_dotenv
@@ -248,6 +249,93 @@ def _format_tool_output(name: str, result: dict[str, Any]) -> str:
     if name == "draft_rfi":
         return _format_draft_rfi_output(result)
     return json.dumps(result, indent=2)
+
+
+def triage_with_lookup(issue_text: str) -> dict[str, Any]:
+    lookup_result = lookup_issue_kb(query_text=issue_text, top_k=5)
+    best_match = lookup_result.get("best_match") or {}
+    triage_result = triage_issue(
+        issue_text=issue_text,
+        system_hint=best_match.get("system"),
+        stage_hint=best_match.get("stage"),
+    )
+    return {
+        "issue_text": issue_text,
+        "lookup": lookup_result,
+        "triage": triage_result,
+    }
+
+
+def format_triage_with_lookup_output(result: dict[str, Any]) -> str:
+    lookup_result = result.get("lookup", {})
+    triage_result = result.get("triage", {})
+    blocks = [
+        _format_tool_output("lookup_issue_kb", lookup_result),
+        _format_tool_output("triage_issue", triage_result),
+    ]
+    if triage_result.get("needs_rfi"):
+        blocks.append(
+            "RFI recommendation: This issue appears to need design clarification. "
+            "Would you like me to draft an RFI for this issue? Reply `yes`."
+        )
+    return "\n\n".join(blocks)
+
+
+def _split_field_checks(field_checks: str, max_items: int = 4) -> list[str]:
+    if not field_checks:
+        return []
+    items = [item.strip() for item in field_checks.split(";") if item.strip()]
+    return items[:max_items]
+
+
+def draft_rfi_from_issue(
+    issue_text: str,
+    project: str = "Project TBD",
+    needed_by_date: str | None = None,
+) -> dict[str, Any]:
+    lookup_result = lookup_issue_kb(query_text=issue_text, top_k=5)
+    best_match = lookup_result.get("best_match") or {}
+
+    system = best_match.get("system") or "System TBD"
+    location_scope = best_match.get("location_scope") or "Location TBD"
+    issue_summary = f"{issue_text} (based on KB: {lookup_result.get('citation', 'N/A')})"
+    observations = _split_field_checks(best_match.get("field_checks", ""))
+    if not observations:
+        observations = ["Field observations to be confirmed onsite."]
+
+    question_to_designer = (
+        best_match.get("rfi_template_question")
+        or "Please confirm design intent, control sequence, and acceptance criteria."
+    )
+    if not needed_by_date:
+        needed_by_date = (date.today() + timedelta(days=7)).isoformat()
+
+    rfi_result = draft_rfi(
+        project=project,
+        system=system,
+        location_scope=location_scope,
+        issue_summary=issue_summary,
+        observations=observations,
+        question_to_designer=question_to_designer,
+        needed_by_date=needed_by_date,
+        attachments_suggested=[
+            "Trend logs for key setpoints/commands/feedback",
+            "Relevant BAS screenshots and alarms",
+            "Sequence-of-operations excerpt and latest addenda/RFIs",
+        ],
+    )
+    return {
+        "lookup": lookup_result,
+        "rfi": rfi_result,
+    }
+
+
+def format_draft_rfi_from_issue_output(result: dict[str, Any]) -> str:
+    lookup_result = result.get("lookup", {})
+    rfi_result = result.get("rfi", {})
+    citation = lookup_result.get("citation", "")
+    citation_line = f"Based on KB case: {citation}" if citation else "Based on current issue context."
+    return f"{citation_line}\n\n{_format_tool_output('draft_rfi', rfi_result)}"
 
 
 def _history_to_messages(

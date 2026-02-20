@@ -53,6 +53,11 @@ DISAMBIG_WEATHER_RAG = (
 DISAMBIG_RAG_FUNCTION = (
     "Do you want MEP troubleshooting retrieval (Service 2) or structured triage/RFI tooling (Service 3)?"
 )
+RFI_FOLLOWUP_PROMPT = (
+    "RFI follow-up: Reply `yes` to draft an RFI for this issue, or `no` to skip."
+)
+
+
 def _intent_score(message: str, hints: tuple[str, ...]) -> int:
     lowered = message.lower()
     return sum(1 for hint in hints if hint in lowered)
@@ -114,6 +119,120 @@ def _parse_service_choice(message: str) -> str | None:
         return "service3"
 
     return None
+
+
+def _is_affirmative(message: str) -> bool:
+    lowered = " ".join(message.lower().strip().split())
+    return lowered in {
+        "y",
+        "yes",
+        "yep",
+        "sure",
+        "ok",
+        "okay",
+        "need",
+        "need rfi",
+        "draft rfi",
+        "please do",
+    }
+
+
+def _is_negative(message: str) -> bool:
+    lowered = " ".join(message.lower().strip().split())
+    return lowered in {"n", "no", "nope", "skip", "not now"}
+
+
+def _extract_triage_issue_text(message: str) -> str:
+    text = message.strip()
+    patterns = (
+        r"(?is)^\s*triage\s+this\s+issue\s*:\s*(.+)$",
+        r"(?is)^\s*triage\s*:\s*(.+)$",
+        r"(?is)^\s*triage\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if match:
+            return match.group(1).strip()
+    return text
+
+
+def _is_explicit_triage_request(message: str) -> bool:
+    lowered = message.lower().strip()
+    if lowered in {"triage", "service 3", "structured triage/rfi tooling"}:
+        return False
+    return bool(re.match(r"^\s*triage\b", lowered))
+
+
+def _pending_rfi_issue_from_history(history: list[dict]) -> str | None:
+    if not history:
+        return None
+
+    for idx in range(len(history) - 1, -1, -1):
+        item = history[idx]
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") != "assistant":
+            continue
+        assistant_text = _history_text(item)
+        if RFI_FOLLOWUP_PROMPT not in assistant_text:
+            continue
+        for jdx in range(idx - 1, -1, -1):
+            prev = history[jdx]
+            if not isinstance(prev, dict) or prev.get("role") != "user":
+                continue
+            issue_text = _extract_triage_issue_text(_history_text(prev))
+            return issue_text if issue_text else None
+        return None
+    return None
+
+
+def _run_explicit_triage(message: str) -> str:
+    issue_text = _extract_triage_issue_text(message)
+    try:
+        from services.function_calling_service import (
+            format_triage_with_lookup_output,
+            triage_with_lookup,
+        )
+
+        result = triage_with_lookup(issue_text=issue_text)
+        triage_info = result.get("triage", {})
+        needs_rfi = bool(triage_info.get("needs_rfi"))
+        recommendation = (
+            "RFI recommendation: triage indicates design clarification is likely needed."
+            if needs_rfi
+            else "RFI recommendation: triage does not require RFI by default, but you can still draft one."
+        )
+        response_text = (
+            f"{format_triage_with_lookup_output(result)}\n\n"
+            f"{recommendation}\n"
+            f"{RFI_FOLLOWUP_PROMPT}"
+        )
+        return f"{PERSONA}\n\n{response_text}"
+    except Exception as exc:
+        return (
+            f"{PERSONA}\n\n"
+            "Service 3 triage is unavailable right now.\n"
+            "Please check API gateway access and try again.\n"
+            f"Details: {exc}"
+        )
+
+
+def _run_rfi_from_issue(issue_text: str) -> str:
+    try:
+        from services.function_calling_service import (
+            draft_rfi_from_issue,
+            format_draft_rfi_from_issue_output,
+        )
+
+        rfi_result = draft_rfi_from_issue(issue_text=issue_text)
+        return f"{PERSONA}\n\n{format_draft_rfi_from_issue_output(rfi_result)}"
+    except Exception as exc:
+        return (
+            f"{PERSONA}\n\n"
+            "Service 3 RFI drafting is unavailable right now.\n"
+            "Please check API gateway access and try again.\n"
+            f"Details: {exc}"
+        )
 
 
 def _run_service3(message: str, history: list[dict] | None = None) -> str:
@@ -182,6 +301,20 @@ def assignment_chat(message: str, history: list[dict]) -> str:
     guardrail_reply = guardrail_precheck(message)
     if guardrail_reply:
         return guardrail_reply
+
+    pending_issue = _pending_rfi_issue_from_history(history)
+    if pending_issue:
+        if _is_affirmative(message):
+            return _run_rfi_from_issue(pending_issue)
+        if _is_negative(message):
+            return (
+                f"{PERSONA}\n\n"
+                "Understood. I will skip RFI drafting for this issue. "
+                "Send a new issue anytime."
+            )
+
+    if _is_explicit_triage_request(message):
+        return _run_explicit_triage(message)
 
     pending = _pending_disambiguation(history)
     choice = _parse_service_choice(message)
