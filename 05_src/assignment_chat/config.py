@@ -19,6 +19,12 @@ OPENAI_GATEWAY_BASE_URL = (
 )
 FUNCTION_CALLING_MODEL = "gpt-4o-mini"
 
+# Router settings (hybrid LLM intent router)
+USE_LLM_ROUTER = True
+ROUTER_MODEL = "gpt-4o-mini"
+ROUTER_MAX_ACTIONS = 2
+ROUTER_MIN_CONFIDENCE = 0.55
+
 # Weather service settings (Open-Meteo)
 WEATHER_DEFAULT_LOCATION = "Toronto"
 OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
